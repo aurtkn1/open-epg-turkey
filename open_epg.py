@@ -14,7 +14,9 @@ SOURCES = [
     "https://www.open-epg.com/files/turkey5.xml.gz",
 ]
 
-OUTPUT_FILE = "epg.xml"
+OUTPUT_XML = "epg.xml"
+OUTPUT_GZ = "epg.xml.gz"
+
 TIMEOUT = 60
 RETRIES = 3
 
@@ -31,6 +33,8 @@ def download(url):
                 headers={
                     "User-Agent": "Mozilla/5.0",
                     "Accept": "application/gzip,application/xml,text/xml,*/*",
+                    "Accept-Encoding": "gzip",
+                    "Cache-Control": "no-cache",
                 },
             )
 
@@ -42,10 +46,11 @@ def download(url):
 
             return data
 
-        except Exception as e:
-            last_error = e
+        except Exception as exc:
+            last_error = exc
+
             print(
-                f"Hata ({attempt}/{RETRIES}): {e}"
+                f"Hata ({attempt}/{RETRIES}): {exc}"
             )
 
             if attempt < RETRIES:
@@ -54,6 +59,15 @@ def download(url):
     raise RuntimeError(
         f"İndirme başarısız: {url} -> {last_error}"
     )
+
+
+def get_text(element):
+    if element is None:
+        return ""
+
+    return "".join(
+        element.itertext()
+    ).strip()
 
 
 def parse_source(data, source_name):
@@ -74,33 +88,32 @@ def parse_source(data, source_name):
             if not channel_id:
                 continue
 
-            display_names = []
+            display_name = ""
 
             for item in channel.findall("display-name"):
-                text = "".join(item.itertext()).strip()
+                text = get_text(item)
 
                 if text:
-                    display_names.append(text)
+                    display_name = text
+                    break
 
-            icon = channel.find("icon")
-            icon_src = ""
-
-            if icon is not None:
-                icon_src = icon.get("src", "")
+            if not display_name:
+                display_name = channel_id
 
             channels[channel_id] = {
                 "id": channel_id,
-                "names": display_names,
-                "icon": icon_src,
+                "name": display_name,
             }
 
         for programme in root.findall("programme"):
             channel_id = programme.get("channel")
-
             start = programme.get("start")
             stop = programme.get("stop")
 
-            if not channel_id or not start or not stop:
+            if not channel_id:
+                continue
+
+            if not start or not stop:
                 continue
 
             title_element = programme.find("title")
@@ -108,32 +121,18 @@ def parse_source(data, source_name):
             if title_element is None:
                 continue
 
-            title = "".join(
-                title_element.itertext()
-            ).strip()
+            title = get_text(title_element)
 
             if not title:
                 continue
 
             programmes.append(
-                {
-                    "channel": channel_id,
-                    "start": start,
-                    "stop": stop,
-                    "title": title,
-                    "desc": get_element_text(
-                        programme,
-                        "desc"
-                    ),
-                    "category": get_element_text(
-                        programme,
-                        "category"
-                    ),
-                    "sub-title": get_element_text(
-                        programme,
-                        "sub-title"
-                    ),
-                }
+                (
+                    channel_id,
+                    start,
+                    stop,
+                    title,
+                )
             )
 
         print(
@@ -144,24 +143,16 @@ def parse_source(data, source_name):
 
         return channels, programmes
 
-    except Exception as e:
+    except Exception as exc:
         raise RuntimeError(
-            f"{source_name} XML okunamadı: {e}"
+            f"{source_name} okunamadı: {exc}"
         )
 
 
-def get_element_text(parent, tag):
-    element = parent.find(tag)
-
-    if element is None:
-        return ""
-
-    return "".join(
-        element.itertext()
-    ).strip()
-
-
-def merge_data(all_channels, all_programmes):
+def merge_data(
+    all_channels,
+    all_programmes,
+):
     merged_channels = {}
     merged_programmes = {}
 
@@ -171,127 +162,86 @@ def merge_data(all_channels, all_programmes):
             if channel_id not in merged_channels:
                 merged_channels[channel_id] = {
                     "id": channel_id,
-                    "names": [],
-                    "icon": channel.get(
-                        "icon",
-                        ""
-                    ),
+                    "name": channel["name"],
                 }
 
-            existing = merged_channels[channel_id]
-
-            for name in channel.get(
-                "names",
-                []
-            ):
-                if (
-                    name
-                    and name not in existing["names"]
-                ):
-                    existing["names"].append(
-                        name
-                    )
-
-            if (
-                not existing["icon"]
-                and channel.get("icon")
-            ):
-                existing["icon"] = channel[
-                    "icon"
-                ]
-
     for source_programmes in all_programmes:
-        for programme in source_programmes:
+        for (
+            channel_id,
+            start,
+            stop,
+            title,
+        ) in source_programmes:
 
             key = (
-                programme["channel"],
-                programme["start"],
-                programme["stop"],
-                programme["title"],
+                channel_id,
+                start,
+                stop,
+                title,
             )
 
             if key not in merged_programmes:
-                merged_programmes[key] = programme
+                merged_programmes[key] = {
+                    "channel": channel_id,
+                    "start": start,
+                    "stop": stop,
+                    "title": title,
+                }
+
+    programmes = list(
+        merged_programmes.values()
+    )
 
     return (
         list(merged_channels.values()),
-        list(merged_programmes.values()),
+        programmes,
     )
 
 
-def write_xml(
+def build_xml(
     channels,
-    programmes
+    programmes,
 ):
-    tv = ET.Element(
+    root = ET.Element(
         "tv",
         {
-            "generator-info-name": (
-                "Open-EPG Turkey Birleştirici"
-            ),
-            "generator-info-url": (
-                "https://www.open-epg.com/"
-            ),
+            "generator-info-name": "Open-EPG Turkey",
+            "generator-info-url": "https://www.open-epg.com/",
         },
     )
 
     for channel in channels:
         channel_element = ET.SubElement(
-            tv,
+            root,
             "channel",
             {
-                "id": channel["id"]
+                "id": channel["id"],
             },
         )
 
-        names = channel.get(
-            "names",
-            []
+        display = ET.SubElement(
+            channel_element,
+            "display-name",
+            {
+                "lang": "tr",
+            },
         )
 
-        if not names:
-            names = [
-                channel["id"]
-            ]
-
-        for name in names:
-            display = ET.SubElement(
-                channel_element,
-                "display-name",
-                {
-                    "lang": "tr"
-                },
-            )
-
-            display.text = name
-
-        icon = channel.get(
-            "icon",
-            ""
-        )
-
-        if icon:
-            ET.SubElement(
-                channel_element,
-                "icon",
-                {
-                    "src": icon
-                },
-            )
+        display.text = channel["name"]
 
     programmes = sorted(
         programmes,
-        key=lambda p: (
-            p["start"],
-            p["channel"],
-            p["stop"],
-            p["title"],
+        key=lambda item: (
+            item["start"],
+            item["channel"],
+            item["stop"],
+            item["title"],
         ),
     )
 
     for programme in programmes:
-        programme_element = ET.SubElement(
-            tv,
+        element = ET.SubElement(
+            root,
             "programme",
             {
                 "channel": programme["channel"],
@@ -301,81 +251,56 @@ def write_xml(
         )
 
         title = ET.SubElement(
-            programme_element,
+            element,
             "title",
             {
-                "lang": "tr"
+                "lang": "tr",
             },
         )
 
         title.text = programme["title"]
 
-        subtitle = programme.get(
-            "sub-title",
-            ""
-        )
-
-        if subtitle:
-            element = ET.SubElement(
-                programme_element,
-                "sub-title",
-                {
-                    "lang": "tr"
-                },
-            )
-
-            element.text = subtitle
-
-        desc = programme.get(
-            "desc",
-            ""
-        )
-
-        if desc:
-            element = ET.SubElement(
-                programme_element,
-                "desc",
-                {
-                    "lang": "tr"
-                },
-            )
-
-            element.text = desc
-
-        category = programme.get(
-            "category",
-            ""
-        )
-
-        if category:
-            element = ET.SubElement(
-                programme_element,
-                "category",
-                {
-                    "lang": "tr"
-                },
-            )
-
-            element.text = category
-
-    tree = ET.ElementTree(tv)
-
     ET.indent(
-        tree,
-        space="  "
+        root,
+        space="  ",
     )
 
+    tree = ET.ElementTree(root)
+
     tree.write(
-        OUTPUT_FILE,
+        OUTPUT_XML,
         encoding="utf-8",
         xml_declaration=True,
     )
 
 
+def create_gzip():
+    with open(
+        OUTPUT_XML,
+        "rb",
+    ) as source:
+
+        with gzip.open(
+            OUTPUT_GZ,
+            "wb",
+            compresslevel=9,
+        ) as target:
+
+            while True:
+                chunk = source.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                target.write(chunk)
+
+
 def main():
     print()
     print("=" * 70)
-    print("OPEN-EPG TURKEY BİRLEŞTİRİCİ")
+    print("OPEN-EPG TURKEY - HAFİF EPG")
     print("=" * 70)
     print()
 
@@ -384,17 +309,17 @@ def main():
 
     for index, url in enumerate(
         SOURCES,
-        start=1
+        start=1,
     ):
-        source_name = (
-            f"Turkey {index}"
-        )
+        source_name = f"Turkey {index}"
 
-        data = download(url)
+        data = download(
+            url
+        )
 
         channels, programmes = parse_source(
             data,
-            source_name
+            source_name,
         )
 
         all_channels.append(
@@ -406,21 +331,11 @@ def main():
         )
 
     print()
-    print(
-        "5 kaynak birleştiriliyor..."
-    )
+    print("Kaynaklar birleştiriliyor...")
 
     channels, programmes = merge_data(
         all_channels,
-        all_programmes
-    )
-
-    print(
-        f"Birleşik kanal sayısı : {len(channels)}"
-    )
-
-    print(
-        f"Birleşik program sayısı: {len(programmes)}"
+        all_programmes,
     )
 
     if not channels:
@@ -433,13 +348,30 @@ def main():
             "Hiç program bulunamadı."
         )
 
-    write_xml(
-        channels,
-        programmes
+    print(
+        f"Toplam kanal   : {len(channels)}"
     )
 
-    file_size = Path(
-        OUTPUT_FILE
+    print(
+        f"Toplam program  : {len(programmes)}"
+    )
+
+    print()
+    print("Hafif XML oluşturuluyor...")
+
+    build_xml(
+        channels,
+        programmes,
+    )
+
+    create_gzip()
+
+    xml_size = Path(
+        OUTPUT_XML
+    ).stat().st_size
+
+    gz_size = Path(
+        OUTPUT_GZ
     ).stat().st_size
 
     print()
@@ -447,16 +379,10 @@ def main():
     print("TAMAMLANDI")
     print("=" * 70)
     print(
-        f"Dosya   : {OUTPUT_FILE}"
+        f"XML   : {xml_size / 1024 / 1024:.2f} MB"
     )
     print(
-        f"Kanal   : {len(channels)}"
-    )
-    print(
-        f"Program : {len(programmes)}"
-    )
-    print(
-        f"Boyut   : {file_size / 1024 / 1024:.2f} MB"
+        f"GZIP  : {gz_size / 1024 / 1024:.2f} MB"
     )
     print("=" * 70)
 
